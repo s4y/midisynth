@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<script>
+
+const ac = new AudioContext();
+
+// From https://developer.mozilla.org/en-US/docs/Web/API/DynamicsCompressorNode
+const compressor = ac.createDynamicsCompressor();
+compressor.threshold.setValueAtTime(-50, ac.currentTime);
+compressor.knee.setValueAtTime(40, ac.currentTime);
+compressor.ratio.setValueAtTime(12, ac.currentTime);
+compressor.attack.setValueAtTime(0, ac.currentTime);
+compressor.release.setValueAtTime(0.25, ac.currentTime);
+compressor.connect(ac.destination);
+
+const dest = compressor;
+
+const frequencyForNote =
+  note => 440 * Math.pow(2, note / 12);
+
+const playNote = (time, note, velocity, wave) => {
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.frequency.setValueAtTime(frequencyForNote(note), time);
+  gain.gain.setValueAtTime(0, time);
+  gain.gain.setTargetAtTime(velocity, time, 0.001);
+  gain.gain.setTargetAtTime(0, time + 0.1, 1);
+  if (wave)
+    osc.setPeriodicWave(wave);
+  osc.connect(gain);
+  gain.connect(dest);
+  osc.start(time);
+
+  return time => {
+    gain.gain.cancelScheduledValues(time);
+    gain.gain.setTargetAtTime(0, time, 0.1);
+    osc.stop(time + 1.0);
+  };
+};
+
+const activeNotes = {};
+let buffer = [];
+let loopStartTime = 0;
+let loopDuration = 0;
+let lastScheduledTime = 0;
+let dubbing = false;
+
+const schedule = (event, time) => {
+  const {channel, button, value, wave} = event;
+
+  if (button in activeNotes) {
+    activeNotes[button](time);
+    delete activeNotes[button];
+  }
+
+  // Key down
+  if (channel == 144) {
+    // A4 is button 69.
+    activeNotes[button] = playNote(time, button - 69, value / 128, wave);
+  }
+};
+
+const checkBuffer = () => {
+  if (!buffer.length || !loopDuration)
+    return;
+  let goalTime = ac.currentTime + 0.5;
+  for (const event of buffer) {
+    while (event.lastScheduledTime + loopDuration <= goalTime) {
+      schedule(event, event.lastScheduledTime + loopDuration);
+      event.lastScheduledTime += loopDuration;
+    } 
+  };
+};
+
+setInterval(checkBuffer, 250);
+
+let wave = null;
+
+navigator.requestMIDIAccess({
+  sysex: false
+}).then(midi => {
+  const input = midi.inputs.values().next().value;
+  input.onmidimessage = e => {
+    console.log(e.data);
+    const [channel, button, value] = e.data;
+
+    if (channel == 224) {
+      if (value == 0) {
+        if (!loopStartTime)
+          loopStartTime = ac.currentTime;
+        else if (!loopDuration)
+          loopDuration = ac.currentTime - loopStartTime;
+        dubbing = !dubbing;
+      }
+      return;
+    }
+
+    // Modulation wheel
+    if (channel == 176) {
+      const real = new Float32Array(3);
+      const imag = new Float32Array(3);
+      real[0] = 0;
+      imag[0] = 0;
+      real[1] = 1;
+      imag[1] = 0;
+      real[2] = value/128;
+      imag[2] = 0;
+      wave = ac.createPeriodicWave(real, imag);
+      return;
+    }
+
+    const event = {
+      channel, button, value, wave,
+      lastScheduledTime: ac.currentTime,
+    };
+
+    schedule(event, ac.currentTime);
+    if (dubbing)
+      buffer.push(event);
+  };
+});
+
+</script>
